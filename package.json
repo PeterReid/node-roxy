@@ -1,0 +1,8 @@
+{
+  "name": "roxy",
+  "version": "0.0.1",
+  "dependencies": {
+    "http-routing-proxy": "git://github.com/PeterReid/node-routing-http-proxy.git",
+    "seq": "~0.3.5"
+  }
+}
