@@ -74,6 +74,30 @@ Roxy.prototype.onReadSettings = function(err, fileString) {
   this.validateSettings(settings, this.onValidatedSettings.bind(this));
 };
 
+/**
+ * dir: prefix for all paths
+ * files: {path -> ?}
+ * cb: fn(err, {path -> file contents Buffer})
+ */
+function readFileSet(dir, needed, cb) {
+  var gotten = {};
+  Seq(unionKeys(needed, {}))
+    .seqEach(function(file) {
+      var next = this;
+      fs.readFile(path.join(dir, file), function(err, contents) {
+        if (err) return next(err);
+        gotten[file] = contents;
+        next();
+      })
+    })
+    .seq(function() {
+      cb(null, gotten);
+    })
+    .catch(function(err) {
+      cb(err);
+    });
+}
+
 var knownProtocols = {
   'http': {
     secure: false,
@@ -103,9 +127,16 @@ function parseUri(inputPath) {
   };
 }
 
+function resolveCertAndKey(dest, files) {
+  if (dest.cert) dest.cert = files[dest.cert];
+  if (dest.key) dest.key = files[dest.key];
+}
+
 Roxy.prototype.validateSettings = function(settings, cb) {
   console.log("validating settings");
   var instructionsByPort = {};
+  
+  var neededFiles = {};
   
   for (var inputPath in settings) {
     var input = parseUri(inputPath);
@@ -130,56 +161,41 @@ Roxy.prototype.validateSettings = function(settings, cb) {
     instructions.hosts[input.host] = 
       output.redirect ? {redirect: output.redirect} : parseUri(output.target);
     if (input.secure) {
-      if (instructions.cert && output.cert != instructions.cert) {
-        throw new Error('Conflicting certificates for port ' + input.port);
-      }
-      if (instructions.key && output.key != instructions.key) {
-        throw new Error('Conflicting keys for port ' + input.port);
-      }
-      instructions.cert = output.cert;
-      instructions.key = output.key;
+      instructions.hosts[input.host].cert = output.cert;
+      instructions.hosts[input.host].key = output.key;
+      neededFiles[output.cert] = true;
+      neededFiles[output.key] = true;
       
+      //if (instructions.cert && output.cert != instructions.cert) {
+      //  throw new Error('Conflicting certificates for port ' + input.port);
+      //}
+      //if (instructions.key && output.key != instructions.key) {
+      //  throw new Error('Conflicting keys for port ' + input.port);
+      //}
+      if (!instructions.cert && !instructions.key) {
+        instructions.cert = output.cert;
+        instructions.key = output.key;
+      }      
     }
   }
   
+  console.log(neededFiles);
+  
   var dir = path.dirname(this.settingsPath);
   
-  var portList = unionKeys(instructionsByPort, {})
-  
-  console.log('read: ', JSON.stringify(instructionsByPort));
-  Seq(portList)
-    .parEach(function(port) {
-      if (!instructionsByPort[port].cert) return this();
+  readFileSet(dir, neededFiles, function(err, files) {
+    if (err) return cb(err);
+    
+    for (var port in instructionsByPort) {
+      var instructions = instructionsByPort[port];
+      resolveCertAndKey(instructions, files);
       
-      var next = this;
-      console.log(dir, instructionsByPort[port], path.join(dir, instructionsByPort[port].cert));
-      fs.readFile(path.join(dir, instructionsByPort[port].cert), function(err, contents) {
-        if (err) return next(err);
-        console.log('got ' + contents);
-        instructionsByPort[port].cert = contents;
-        next();
-      });
-    })
-    .set(portList)
-    .parEach(function(port) {
-      console.log('maybe getting key for port', instructionsByPort[port]); 
-      if (!instructionsByPort[port].key) return this();
-      
-      console.log('getting key for port', port);
-      
-      var next = this;
-      fs.readFile(path.join(dir, instructionsByPort[port].key), function(err, contents) {
-        console.log('got key', contents);
-        if (err) return next(err);
-        console.log('got ' + contents);
-        instructionsByPort[port].key = contents;
-        next();
-      });
-    })
-    .seq(function() {
-      console.log('cb!');
-      cb(null, instructionsByPort);
-    });
+      for (var host in instructions.hosts) {
+        resolveCertAndKey(instructions.hosts[host], files);
+      }
+    }
+    cb(null, instructionsByPort);
+  });
 }
 
 function unionKeys(ob1, ob2) {

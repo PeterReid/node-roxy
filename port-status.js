@@ -17,6 +17,7 @@ var EventEmitter = require('events').EventEmitter;
 var util = require('util');
 var net = require('net');
 var tls = require('tls');
+var crypto = require('crypto');
 
 function PortStatus(port) {
   EventEmitter.call(this);
@@ -36,19 +37,42 @@ function optionsEqual(o1, o2) {
   }
 }
 
+function withSNICallback(options) {
+  var withSNI = {};
+  for (var option in options) {
+    withSNI[option] = options[option];
+  }
+  
+  var contexts = {};
+  for (var host in options.hosts) {
+    var hostSettings = options.hosts[host];
+    if (hostSettings.cert && hostSettings.key) {
+      var credentials = crypto.createCredentials({
+        key: options.hosts[host].key,
+        cert: options.hosts[host].cert,
+      });
+      contexts[host] = credentials.context;
+    }
+  }
+  withSNI.SNICallback = function(host) {
+    return contexts[host] || contexts['www.' + host]
+  }
+  return withSNI;
+}
+
 PortStatus.prototype.setOptions = function(options) {
   this.goalOptions = options;
   this.step();
 };
-
+var i = 0;
 PortStatus.prototype.createServer = function(options) {
   var onConnection = function(conn) {
-    console.log('stream!');
+    console.log('stream!', i++);
     this.emit('stream', conn);
   }.bind(this)
   
   if (options.secure) {
-    return tls.createServer(options, onConnection);
+    return tls.createServer(withSNICallback(options), onConnection);
   } else {
     return net.createServer(options, onConnection);
   }
