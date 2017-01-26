@@ -47,16 +47,23 @@ function withSNICallback(options) {
   for (var host in options.hosts) {
     var hostSettings = options.hosts[host];
     if (hostSettings.cert && hostSettings.key) {
-      var credentials = crypto.createCredentials({
+      // crypto.createCredentials was deprecated
+      var credentials = (tls.createSecureContext || crypto.createCredentials)({
         key: options.hosts[host].key,
         cert: options.hosts[host].cert,
       });
       contexts[host] = credentials.context;
     }
   }
-  withSNI.SNICallback = function(host) {
-    return contexts[host] || contexts['www.' + host]
+  withSNI.SNICallback = function(host, cb) {
+    var context = contexts[host] || contexts['www.' + host];
+    if (cb) {
+      cb(null, context);
+    } else {
+      return context;
+    }
   }
+  withSNI.secureProtocol = 'TLSv1_method'
   return withSNI;
 }
 

@@ -8,8 +8,36 @@ var Seq = require('seq');
 var path = require('path');
 var PortStatus = require('./port-status');
 var RedirectorStream = require('./redirector-stream');
+var http = require('http');
+var url = require('url');
 
-function Roxy(settingsPath) {
+
+var Stream = require('stream');
+var StaticStream = function() {
+  Stream.call(this);
+  
+  process.nextTick(function() {
+    this.emit('data', 'HTTP/1.1 200 OK\r\n\r\n{"messages": [], "required_documents": [], "factor": 10000}');
+    this.emit('end')
+  }.bind(this));
+};
+util.inherits(StaticStream, Stream);
+StaticStream.prototype.readable = true;
+StaticStream.prototype.write = function() {}
+StaticStream.prototype.end = function() {}
+StaticStream.prototype.destroy = function() {}
+StaticStream.prototype.destroySoon = function() {}
+StaticStream.prototype.pause = function() {}
+StaticStream.prototype.resume = function() {}
+StaticStream.prototype.setEncoding = function() {}
+
+
+
+process.on('uncaughtException', function(e) {
+  console.log('Uncaught exception:', e);
+});
+
+function Roxy(settingsPath, debugPort) {
   EventEmitter.call(this);
   
   this.settingsPath = settingsPath;
@@ -19,6 +47,13 @@ function Roxy(settingsPath) {
   
   fs.watchFile(settingsPath, {persistent: false}, this.beginSettingsLoad.bind(this));
   this.beginSettingsLoad();
+  
+  if (debugPort) {
+    this.startDebugServer(debugPort);
+  }
+  
+  this.recentAccess = new Array(1024);
+  this.recentAccessWriteIdx = 0;
 };
 util.inherits(Roxy, EventEmitter);
 
@@ -33,12 +68,26 @@ function stripPort(host) {
 }
 
 
-console.log('emit is',RedirectorStream.prototype.emit);
+var sourceIPs = {};
+
+function recordSourceIP(host, requestorStream, targetStream) {
+  targetStream.once('connect', function() {
+    console.log('data', host, requestorStream.remoteAddress, targetStream.localPort, targetStream.remotePort);
+    sourceIPs[targetStream.localPort] = requestorStream.remoteAddress;
+  });
+}
+
+var ipSourceResolver = http.createServer(function(req, res) {
+  var port = req.url.substring(1);
+  res.end(sourceIPs[port]);
+}).listen(10030, 'localhost');
+
 
 function createTargetStream(host, uri) {
   //console.log('Need target stream for ' + host);
+  this._proxiedFor = host;
   
-  host = stripPort(host);
+  
   var stream = this;
   var server = this._server;
   var port = server.port;
@@ -49,14 +98,22 @@ function createTargetStream(host, uri) {
   var hostRoutes = currentInstructions && currentInstructions.hosts;
   //console.log('hostRoutes=', hostRoutes);
  
+  stream._proxiedFor = host;
+ 
   var hostRoute = hostRoutes && hostRoutes[host];
   if (!hostRoute) return null;
    
   if (hostRoute.redirect) {
     return new RedirectorStream(hostRoute.redirect + uri);
   }
+  if (uri.indexOf('/get_new_messages/')>=0) {
+    return new StaticStream();
+  }
   
-  return net.connect(hostRoute.port, hostRoute.host); 
+  var stream = net.connect(hostRoute.port, hostRoute.host);
+  this.once('proxy', recordSourceIP);
+  
+  return stream; 
 }
 
 Roxy.prototype.onReadSettings = function(err, fileString) {
@@ -226,6 +283,7 @@ Roxy.prototype.onValidatedSettings = function(err, portInstructions) {
         //console.log('handling a stream');
         stream._server = this;
         roxy.proxy.proxy(stream);
+        stream.on('data', Roxy.prototype.onData.bind(roxy, stream));
       });
     }
     
@@ -234,6 +292,64 @@ Roxy.prototype.onValidatedSettings = function(err, portInstructions) {
   });
 };
 
+
+Roxy.prototype.onData = function(stream, data) {
+  if (data.length > 5) {
+    var c0 = data[0];
+    var c1 = data[1];
+    var c2 = data[2];
+    var c3 = data[3];
+    var c4 = data[4];
+    if (
+      (c0==71 && c1==69 && c2==84 && c3==32)
+      ||
+      (c0==80 && c1==79 && c2==83 && c3==84)
+      ) {
+      var c;
+      for (var i=0; i<data.length && i < 256 && (c=data[i])>=32 && c<=126; i++) {
+        i++;
+      }
+      
+      this.recentAccess[this.recentAccessWriteIdx] = new Date().toISOString() + ' ' + stream._proxiedFor + ' ' + stream.remoteAddress + ' ' + data.slice(0, i).toString();
+      this.recentAccessWriteIdx = (this.recentAccessWriteIdx+1) % this.recentAccess.length;
+    }
+  }
+}
+
+Roxy.prototype.startDebugServer = function(port) {
+  console.log('starting debug server on port', port)
+  http.createServer(this.onDebugRequest.bind(this))
+    .listen(port, 'localhost')
+    .on('error', function(err) {
+      console.log('Error from debug server', err);
+    });
+}
+
+Roxy.prototype.onDebugRequest = function(req, res) {
+  //console.log('arguments')
+  
+  var param = url.parse(req.url, true);
+  if (param.pathname == '/access') {
+    var q = param.query['q'] || '';
+    var recent = [];
+    var idx = this.recentAccessWriteIdx - 1;
+    for (var i = 0; i < this.recentAccess.length; i++) {
+      if (idx==-1) idx = this.recentAccess.length-1;
+      var msg = this.recentAccess[idx];
+      if (msg && msg.indexOf(q)>=0) {
+        recent.push(msg)
+      }
+      idx--;
+    }
+    res.end(recent.join('\n'));
+  } else {
+    res.end('--')
+  }
+}
+
+
+
+
 function annotateError(text, baseError) {
   baseError.message = baseError.message 
     ? text + ' ' + baseError.message
@@ -241,4 +357,4 @@ function annotateError(text, baseError) {
   return baseError;
 }
 
-new Roxy('./sample2.json');
+new Roxy('./sample2.json', 8090);
